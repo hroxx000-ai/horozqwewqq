@@ -17,7 +17,9 @@ KULLANIM:
 
 import requests
 
-TOKEN = "YOUR_GITHUB_TOKEN"  # <-- buraya kendi token'ını yapıştır
+import os
+
+TOKEN = os.environ.get("GH_TOKEN", "YOUR_GITHUB_TOKEN")  # token GitHub Actions secret'ından gelir
 TOP_N = 30                   # <-- en yüksekten en aşağıya kaç repo izlensin
 
 
