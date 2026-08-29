@@ -1,22 +1,19 @@
 """
-GITHUB TOPLU BILDIRIM ACMA SCRIPTI (gelismis surum)
-=====================================================
-Bu script senin bir liste vermene gerek kalmadan, GitHub'daki EN POPULER
-ve EN HAREKETLI (en cok konusulan / en cok commit-tartisma alan) public
-repolari otomatik olarak bulur ve hepsini "Watch" (izle) durumuna getirir.
-Boylece bu repolarda yeni commit, issue, pull request veya tartisma
-oldugunda Gmail'ine bildirim e-postasi gelmeye baslar.
+GITHUB TOPLU BILDIRIM ACMA SCRIPTI (genis kapsam / yuksek hacim surumu)
+=========================================================================
+Bu script GitHub'daki cok sayida populer/hareketli public repoyu bulup
+hepsini "Watch" (izle) durumuna getirir. Boylece bu repolarda yeni
+commit, issue, pull request veya tartisma oldukca Gmail'ine bildirim
+e-postasi gelmeye baslar.
 
-NASIL BULUYOR?
-- Once en cok yildiz alan (en populer) repolari tarar.
-- Sonra son gunlerde en cok guncellenmis / en hareketli repolari tarar
-  (yani su an aktif olarak "konusulan", commit atilan projeler).
-- Ikisini birlestirip, en yuksekten en dusuge tekrar siralar, TOP_N
-  kadarini alir ve hepsinde bildirimi acar.
-
-UYARI: TOP_N sayisi ne kadar yuksek olursa, Gmail'ine o kadar cok
-e-posta gelir. 2000 gibi buyuk bir sayida GUNDE BINLERCE e-posta
-gelebilir. Istersen TOP_N degerini kucultup tekrar calistirabilirsin.
+ONEMLI GERCEKLER:
+- Watch etmek ANINDA e-posta URETMEZ. E-postalar, izledigin repolarda
+  ILERIDE olacak hareketlerle birlikte zamanla birikir.
+- GitHub arama API'si TEK SORGUDA EN FAZLA 1000 sonuc verir (sabit bir
+  kural). Bu yuzden cok sayida repo toplamak icin arama, farkli yildiz
+  araliklarina (STAR_BUCKETS) bolunerek tekrarlanir.
+- TOP_N = 50000 olarak ayarlanmis olsa da, gercekte GitHub'da o kadar
+  "anlamli / aktif" repo olmayabilir; script bulabildigi kadarini alir.
 
 KULLANIM:
 1. TOKEN, GH_TOKEN adinda bir GitHub Actions secret'indan otomatik gelir.
@@ -26,10 +23,11 @@ KULLANIM:
 
 import os
 import time
+import datetime
 import requests
 
 TOKEN = os.environ.get("GH_TOKEN", "YOUR_GITHUB_TOKEN")
-TOP_N = 2000  # <-- en yuksekten en asagiya kac repo izlensin
+TOP_N = 50000  # <-- hedef ust sinir (gercekte bulunabilen kadari islenir)
 
 HEADERS = {
     "Authorization": f"token {TOKEN}",
@@ -38,68 +36,88 @@ HEADERS = {
 
 SEARCH_URL = "https://api.github.com/search/repositories"
 
+# Yildiz sayisina gore arama havuzunu genisletmek icin bolunmus araliklar.
+# Her aralik GitHub arama API'sinde ayri bir sorgu sayilir, boylece
+# 1000 sonuc sinirini asip cok daha genis bir repo havuzu toplariz.
+STAR_BUCKETS = [
+    "stars:>50000",
+    "stars:20000..50000",
+    "stars:10000..20000",
+    "stars:5000..10000",
+    "stars:2000..5000",
+    "stars:1000..2000",
+    "stars:500..1000",
+    "stars:200..500",
+    "stars:100..200",
+    "stars:50..100",
+]
 
-def safe_get(url, params=None, retries=3):
-    """Rate limit'e takilirsa biraz bekleyip tekrar dener."""
+
+def request_with_retry(method, url, retries=5, **kwargs):
+    """Rate limit'e (hiz sinirina) takilirsa GitHub'in soyledigi sureyi
+    bekleyip tekrar dener. Boylece script hata verip yarida durmaz."""
     for attempt in range(retries):
-        r = requests.get(url, headers=HEADERS, params=params)
-        if r.status_code == 200:
+        r = requests.request(method, url, headers=HEADERS, **kwargs)
+        if r.status_code in (200, 201, 204):
             return r
         if r.status_code == 403 and "rate limit" in r.text.lower():
-            print("   ⏳ Hiz siniri asildi, 30 saniye bekleniyor...")
-            time.sleep(30)
+            reset = r.headers.get("X-RateLimit-Reset")
+            wait = 30
+            if reset:
+                wait = max(5, int(reset) - int(time.time()) + 2)
+            print(f"   ⏳ Hız sınırı doldu, {wait} saniye bekleniyor...")
+            time.sleep(min(wait, 120))
             continue
-        r.raise_for_status()
+        return r  # baska bir hata ise oldugu gibi dondur
     return r
 
 
-def search_repos(query, sort, max_items):
-    """Belirtilen kritere gore repo arar, sayfa sayfa gezer."""
+def search_bucket(query, max_items=1000):
+    """Tek bir yildiz araligi icin, en yuksekten en dusuge repo arar."""
     repos = []
     page = 1
     per_page = 100
     while len(repos) < max_items:
         params = {
             "q": query,
-            "sort": sort,
+            "sort": "stars",
             "order": "desc",
             "per_page": per_page,
             "page": page,
         }
-        r = safe_get(SEARCH_URL, params=params)
+        r = request_with_retry("GET", SEARCH_URL, params=params)
+        if r.status_code != 200:
+            break
         data = r.json().get("items", [])
         if not data:
             break
         repos.extend(data)
         page += 1
-        if page > 10:  # GitHub search API sayfa siniri (guvenlik payi)
+        if page > 10:  # GitHub'in sabit sinirindan (1000 sonuc) sonra durur
             break
+        time.sleep(2)  # arama hiz sinirina (30 istek/dk) takilmamak icin
     return repos[:max_items]
 
 
 def get_top_repos(n):
-    """
-    Iki farkli kaynaktan repo toplar:
-    1) En cok yildiz alan (en populer) repolar
-    2) Son zamanlarda en cok guncellenen / en hareketli repolar
-       (yani su an aktif olarak commit-tartisma alan projeler)
-    Ikisini birlestirir, tekrarlari temizler, yildiza gore tekrar
-    siralar ve en yuksekten en dusuge n tanesini dondurur.
-    """
-    print("🔍 En populer repolar taraniyor (yildiz sayisina gore)...")
-    populer = search_repos("stars:>100", "stars", n)
-
-    print("🔍 En hareketli / en cok konusulan repolar taraniyor...")
-    hareketli = search_repos("stars:>50 pushed:>2026-08-01", "updated", n)
-
-    print("🔗 Sonuclar birlestiriliyor ve tekrarlar temizleniyor...\n")
+    """Butun yildiz araliklarini tarar, sonuclari birlestirir, tekrarlari
+    temizler ve en yuksekten en dusuge siralar."""
     merged = {}
-    for repo in populer + hareketli:
-        full_name = repo["full_name"]
-        if full_name not in merged:
-            merged[full_name] = repo
 
-    # en yuksekten en dusuge yildiz sayisina gore sirala
+    for i, bucket in enumerate(STAR_BUCKETS, start=1):
+        print(f"🔍 [{i}/{len(STAR_BUCKETS)}] Taranıyor: {bucket}")
+        repos = search_bucket(bucket)
+        for repo in repos:
+            merged[repo["full_name"]] = repo
+        print(f"   -> şu ana kadar toplam {len(merged)} benzersiz repo bulundu")
+        if len(merged) >= n:
+            break
+
+    print("\n🔍 Son olarak en hareketli (yakın zamanda çok güncellenen) repolar taranıyor...")
+    hareketli = search_bucket("stars:>30 pushed:>2026-08-01", max_items=1000)
+    for repo in hareketli:
+        merged.setdefault(repo["full_name"], repo)
+
     sonuc = sorted(
         merged.values(),
         key=lambda r: r.get("stargazers_count", 0),
@@ -109,19 +127,11 @@ def get_top_repos(n):
 
 
 def watch_repo(owner, name):
-    """Tek bir repo icin bildirimleri (watch) acar.
-    Eger repo zaten izleniyorsa bunu ayri bir durum olarak bildirir."""
+    """Tek bir repo icin bildirimleri (watch) acar. Hiz icin onceden
+    kontrol yapmiyor, direkt izlemeye alma isteği gönderiyor."""
     url = f"https://api.github.com/repos/{owner}/{name}/subscription"
-
-    # once zaten izlenip izlenmedigine bak
-    kontrol = requests.get(url, headers=HEADERS)
-    if kontrol.status_code == 200:
-        zaten_veri = kontrol.json()
-        if zaten_veri.get("subscribed"):
-            return True, "zaten watchlemişsin"
-
     payload = {"subscribed": True, "ignored": False}
-    r = requests.put(url, headers=HEADERS, json=payload)
+    r = request_with_retry("PUT", url, json=payload)
     if r.status_code == 200:
         return True, "onaylandı"
     else:
@@ -130,12 +140,12 @@ def watch_repo(owner, name):
 
 def main():
     if TOKEN == "YOUR_GITHUB_TOKEN":
-        print("⚠️  Lutfen once GH_TOKEN secret'ini ayarla!")
+        print("⚠️  Lütfen önce GH_TOKEN secret'ini ayarla!")
         return
 
     repos = get_top_repos(TOP_N)
     toplam = len(repos)
-    print(f"📋 Toplam {toplam} repo bulundu, en yuksekten en dusuge isleniyor...\n")
+    print(f"\n📋 Toplam {toplam} benzersiz repo bulundu, en yüksekten en düşüğe işleniyor...\n")
 
     basarili = 0
     basarisiz = 0
@@ -147,14 +157,14 @@ def main():
         ok, durum = watch_repo(owner, name)
         if ok:
             basarili += 1
-            print(f"[{i}/{toplam}] ⭐ {stars} - {owner}/{name} -> ✅ {durum}")
         else:
             basarisiz += 1
-            print(f"[{i}/{toplam}] ⭐ {stars} - {owner}/{name} -> ❌ {durum}")
+        print(f"[{i}/{toplam}] ⭐ {stars} - {owner}/{name} -> {'✅' if ok else '❌'} {durum}")
 
     print("\n" + "=" * 50)
-    print(f"BITTI! {basarili} repo onaylandı, {basarisiz} repo basarisiz.")
-    print("Artik bu repolardaki hareketler icin Gmail'ine bildirim gelecek.")
+    print(f"BİTTİ! {basarili} repo onaylandı, {basarisiz} repo başarısız.")
+    print("Bu repolarda ileride olacak hareketler için Gmail'ine")
+    print("zamanla bildirim gelmeye başlayacak (anında değil).")
     print("=" * 50)
 
 
