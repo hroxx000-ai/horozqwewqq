@@ -1,0 +1,24 @@
+name: Bildirim Ac
+
+on:
+  workflow_dispatch:
+
+jobs:
+  run-notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Repo indir
+        uses: actions/checkout@v4
+
+      - name: Python kur
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Gerekli paketi kur
+        run: pip install requests
+
+      - name: Scripti calistir
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: python notify.py
