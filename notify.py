@@ -20,7 +20,7 @@ import requests
 import os
 
 TOKEN = os.environ.get("GH_TOKEN", "YOUR_GITHUB_TOKEN")  # token GitHub Actions secret'ından gelir
-TOP_N = 30                   # <-- en yüksekten en aşağıya kaç repo izlensin
+TOP_N = 300                   # <-- yen yüksekten en aşağıya kaç repo izlensin
 
 
 HEADERS = {
