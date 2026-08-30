@@ -135,7 +135,9 @@ def watch_repo(owner, name):
     if r.status_code == 200:
         return True, "onaylandı"
     else:
-        return False, f"hata {r.status_code}"
+        # Gercek hata mesajini da goster ki sorunu teshis edebilelim
+        detay = r.text[:150].replace("\n", " ")
+        return False, f"hata {r.status_code} -> {detay}"
 
 
 def main():
